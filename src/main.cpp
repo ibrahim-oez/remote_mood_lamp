@@ -1,101 +1,109 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266HTTPClient.h>
-#include "wifi.h"
 
-void handleRoot();
-void sendHttpRequest(const String& path);
+const char* ssid = "FragNach";
+const char* password = "12345678";
 
-// Konfiguration der Pins
-const int buttonPin = A0;  // Button an A0
-const int ledPin = D6;    // LED an D6
+// Pin Definition
+const int switchButtonPin = A0;  // Umschalt-Button
+const int ledPinRed = D6;  // Rote LED
+const int ledPinGreen = D7;  // Grüne LED
 
-// IP-Adresse des anderen ESP8266
-const char* otherESPAddress = "http://192.168.84.43"; // Ersetze durch die IP-Adresse des anderen ESP8266
+ESP8266WebServer server(80);
 
-ESP8266WebServer server(80); // HTTP-Server auf Port 80
-
-// Entprellung
-unsigned long lastDebounceTime = 0;
-const unsigned long debounceDelay = 50; // ms
-int lastButtonState = HIGH;
-int ledState = LOW; // Zustand der LED
+// Funktionsdeklarationen
+void checkButton();
+void updateLEDs(int state);
+void notifyOtherESP(const char* action);
 
 void setup() {
-    pinMode(buttonPin, INPUT); // Button-Pin als Eingang
-    pinMode(ledPin, OUTPUT);   // LED-Pin als Ausgang
-    Serial.begin(115200);
+  Serial.begin(115200);
 
-    // WLAN-Verbindung herstellen
-    if (setup_wifi()) {
-        Serial.println("WiFi erfolgreich verbunden.");
-    } else {
-        Serial.println("WLAN-Verbindung fehlgeschlagen.");
-    }
+  // Setup der Pins
+  pinMode(switchButtonPin, INPUT);  // Umschalt-Button Pin als Eingang
+  pinMode(ledPinRed, OUTPUT);
+  pinMode(ledPinGreen, OUTPUT);
 
-    // HTTP-Routen definieren
-    server.on("/", HTTP_GET, handleRoot);
-    server.on("/led/on", HTTP_GET, []() {
-        digitalWrite(ledPin, HIGH); // LED einschalten
-        server.send(200, "text/plain", "LED eingeschaltet");
-    });
-    server.on("/led/off", HTTP_GET, []() {
-        digitalWrite(ledPin, LOW); // LED ausschalten
-        server.send(200, "text/plain", "LED ausgeschaltet");
-    });
+  // Initialer Zustand der LEDs
+  digitalWrite(ledPinRed, LOW);
+  digitalWrite(ledPinGreen, LOW);
 
-    server.begin();
+  // WLAN Verbindung
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Verbindung wird hergestellt...");
+  }
+  Serial.println("WLAN verbunden!");
+  Serial.print("IP-Adresse: ");
+  Serial.println(WiFi.localIP());
+
+  // Server-Routen definieren
+  server.on("/red", [](){
+    Serial.println("Empfangen: /red");
+    updateLEDs(0);  // Setzt Rot an
+    server.send(200, "text/plain", "Red LED ON, Green LED OFF");
+  });
+
+  server.on("/green", [](){
+    Serial.println("Empfangen: /green");
+    updateLEDs(1);  // Setzt Grün an
+    server.send(200, "text/plain", "Green LED ON, Red LED OFF");
+  });
+
+  server.begin();
+  Serial.println("HTTP Server gestartet");
 }
 
 void loop() {
-    server.handleClient(); // Verarbeite eingehende Anfragen
-
-    // Lese den Zustand des Buttons
-    int reading = analogRead(buttonPin);
-    int buttonState = (reading < 100) ? LOW : HIGH;
-
-    // Entprellung des Buttons
-    unsigned long currentTime = millis();
-    if (buttonState != lastButtonState) {
-        lastDebounceTime = currentTime;
-    }
-
-    if ((currentTime - lastDebounceTime) > debounceDelay) {
-        if (buttonState != ledState) {
-            ledState = buttonState;
-            if (ledState == LOW) {
-                sendHttpRequest("/led/on");
-            } else {
-                sendHttpRequest("/led/off");
-            }
-        }
-    }
-
-    lastButtonState = buttonState;
-
-    delay(50); // Kürzere Verzögerung
+  server.handleClient();
+  checkButton();  // Button-Zustand überprüfen
 }
 
-void handleRoot() {
-    server.send(200, "text/plain", "Willkommen beim LED-Steuerungsserver");
+void checkButton() {
+  // Button-Status
+  int buttonValue = analogRead(switchButtonPin);
+  Serial.print("Button-Wert: ");
+  Serial.println(buttonValue);
+
+  // 0 = Rot, 1 = Grün
+  if (buttonValue > 1000) {  // A0 liest analoge Werte; Schwellenwert für HIGH
+    updateLEDs(1);  // Setzt Grün an
+    notifyOtherESP("/green");  // Informiere den anderen ESP
+  } else {
+    updateLEDs(0);  // Setzt Rot an
+    notifyOtherESP("/red");  // Informiere den anderen ESP
+  }
+
+  delay(1500);  // Debounce für den Taster
 }
 
-void sendHttpRequest(const String& path) {
-    if (WiFi.status() == WL_CONNECTED) {
-        HTTPClient http;
-        WiFiClient client;
-        String url = String(otherESPAddress) + path;
+void updateLEDs(int state) {
+  if (state == 0) {
+    digitalWrite(ledPinRed, HIGH);  // Rote LED an
+    digitalWrite(ledPinGreen, LOW);  // Grüne LED aus
+    Serial.println("LED Zustand: Rot an, Grün aus");
+  } else {
+    digitalWrite(ledPinRed, LOW);  // Rote LED aus
+    digitalWrite(ledPinGreen, HIGH);  // Grüne LED an
+    Serial.println("LED Zustand: Rot aus, Grün an");
+  }
+}
 
-        http.begin(client, url);
-        int httpCode = http.GET();
+void notifyOtherESP(const char* action) {
+  WiFiClient client;
+  const char* otherESPIP = "192.168.84.43";  // IP-Adresse des anderen ESP
+  
+  Serial.print("Sende Anfrage an ");
+  Serial.println(otherESPIP);
 
-        if (httpCode > 0) {
-            String payload = http.getString();
-            Serial.println(payload);
-        } else {
-            Serial.println("Fehler bei der GET-Anfrage");
-        }
-
-        http.end();
-    }
+  if (client.connect(otherESPIP, 80)) {
+    client.print(String("GET ") + action + " HTTP/1.1\r\n" +
+                 "Host: " + otherESPIP + "\r\n" +
+                 "Connection: close\r\n\r\n");
+    client.stop();
+    Serial.println("Anfrage gesendet: " + String(action));
+  } else {
+    Serial.println("Verbindung zum anderen ESP fehlgeschlagen");
+  }
 }
